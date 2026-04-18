@@ -1,15 +1,15 @@
-# J.A.R.V.I.S Backend (Node.js + Express)
+# 🤖 J.A.R.V.I.S Backend (Node.js + Express)
 
 This backend powers your J.A.R.V.I.S assistant with:
 
-- AI chat via Groq
-- Live news via NewsAPI
-- Weather via OpenWeather
-- Local chat history storage via SQLite
+- 💬 AI chat via Groq
+- 📰 Live news via NewsAPI
+- 🌤️ Weather via OpenWeather
+- 🗂️ Local chat history storage via SQLite
 
 ---
 
-## 1) APIs Used and Required Keys
+## 1) 🔑 APIs Used and Required Keys
 
 You need API keys for the following external services:
 
@@ -33,9 +33,9 @@ You need API keys for the following external services:
 
 ---
 
-## 2) How to Get Each API Key
+## 2) 🧭 How to Get Each API Key
 
-### A) Groq API Key
+### A) 🤖 Groq API Key
 
 1. Open: https://console.groq.com/
 2. Sign up or log in.
@@ -43,7 +43,7 @@ You need API keys for the following external services:
 4. Create a new key.
 5. Copy it and set it as `GROQ_API_KEY` in your `.env` file.
 
-### B) NewsAPI Key
+### B) 📰 NewsAPI Key
 
 1. Open: https://newsapi.org/
 2. Click Get API Key and create an account.
@@ -51,7 +51,7 @@ You need API keys for the following external services:
 4. Copy your API key from dashboard.
 5. Set it as `NEWS_API_KEY` in your `.env` file.
 
-### C) OpenWeather API Key
+### C) 🌦️ OpenWeather API Key
 
 1. Open: https://openweathermap.org/api
 2. Sign up or log in.
@@ -59,11 +59,11 @@ You need API keys for the following external services:
 4. Create/copy your key.
 5. Set it as `WEATHER_API_KEY` in your `.env` file.
 
-Note: OpenWeather keys can take a few minutes to become active.
+⏳ Note: OpenWeather keys can take a few minutes to become active.
 
 ---
 
-## 3) Environment Setup
+## 3) ⚙️ Environment Setup
 
 Create a `.env` file in the backend folder:
 
@@ -74,14 +74,14 @@ WEATHER_API_KEY=your_openweather_key_here
 PORT=5000
 ```
 
-Important security note:
+🔒 Important security note:
 
 - Never commit real API keys to GitHub.
 - If keys were exposed, rotate/regenerate them immediately.
 
 ---
 
-## 4) Install and Run
+## 4) 🚀 Install and Run
 
 From backend folder:
 
@@ -107,7 +107,7 @@ Server default URL:
 
 ---
 
-## 5) Quick Health Check
+## 5) 🩺 Quick Health Check
 
 Endpoint:
 
@@ -134,7 +134,7 @@ If any key is missing, the corresponding field becomes `false`.
 
 ---
 
-## 6) Main Backend Endpoints
+## 6) 🌐 Main Backend Endpoints
 
 1. `POST /api/chat`
 
@@ -170,7 +170,7 @@ Example body:
 
 ---
 
-## 7) Database
+## 7) 🗄️ Database
 
 - File: `jarvis.db`
 - Engine: SQLite
@@ -185,7 +185,7 @@ Schema:
 
 ---
 
-## 8) Troubleshooting
+## 8) 🛠️ Troubleshooting
 
 1. Health says a key is false
 
@@ -209,7 +209,7 @@ Schema:
 
 ---
 
-## 9) Project Scripts
+## 9) 📜 Project Scripts
 
 From `package.json`:
 
@@ -218,6 +218,6 @@ From `package.json`:
 
 ---
 
-## 10) Recommended Next Improvement
+## 10) 💡 Recommended Next Improvement
 
 Create a `.env.example` file with placeholders so setup is easier and secrets are never shared.
