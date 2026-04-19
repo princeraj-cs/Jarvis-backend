@@ -26,3 +26,9 @@ dist-ssr
 # Environment variables - NEVER commit these
 .env
 .env.*
+
+# Databases
+jarvis.db
+jarvis.db-journal
+*.db
+*.sqlite

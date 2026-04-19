@@ -1,11 +1,11 @@
 const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
+const ytsr = require('ytsr');
 const { exec } = require('child_process');
-const fs = require('fs');
 const path = require('path');
-require('dotenv').config();
 const sqlite3 = require('sqlite3').verbose();
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -43,12 +43,10 @@ const tools = [
     type: 'function',
     function: {
       name: 'get_news',
-      description: 'Fetch the latest news headlines. Can be filtered by topic (e.g. "tech", "sports").',
+      description: 'Fetch the latest news headlines.',
       parameters: {
         type: 'object',
-        properties: {
-          topic: { type: 'string', description: 'The news topic (optional)' }
-        }
+        properties: { topic: { type: 'string' } }
       }
     }
   },
@@ -56,12 +54,10 @@ const tools = [
     type: 'function',
     function: {
       name: 'get_weather',
-      description: 'Fetch current weather for a specific city.',
+      description: 'Fetch current weather for a city.',
       parameters: {
         type: 'object',
-        properties: {
-          city: { type: 'string', description: 'The name of the city' }
-        },
+        properties: { city: { type: 'string' } },
         required: ['city']
       }
     }
@@ -70,12 +66,10 @@ const tools = [
     type: 'function',
     function: {
       name: 'open_website',
-      description: 'Open a specific website in the browser. Use this for YouTube, Instagram, Facebook, or any URL.',
+      description: 'Open a website or search query in the browser.',
       parameters: {
         type: 'object',
-        properties: {
-          url: { type: 'string', description: 'The URL to open (e.g. youtube.com, google.com)' }
-        },
+        properties: { url: { type: 'string', description: 'URL or search query' } },
         required: ['url']
       }
     }
@@ -84,12 +78,10 @@ const tools = [
     type: 'function',
     function: {
       name: 'open_local_app',
-      description: 'Open a local Windows application. Use this for Notepad, VS Code, Calculator, Chrome, Edge, etc.',
+      description: 'Open a local Windows application.',
       parameters: {
         type: 'object',
-        properties: {
-          appName: { type: 'string', description: 'The common name of the application' }
-        },
+        properties: { appName: { type: 'string' } },
         required: ['appName']
       }
     }
@@ -97,150 +89,104 @@ const tools = [
   {
     type: 'function',
     function: {
-      name: 'close_local_app',
-      description: 'Close a running Windows application.',
+      name: 'media_control',
+      description: 'Play/Search music or videos on YouTube, Spotify, etc.',
       parameters: {
         type: 'object',
         properties: {
-          appName: { type: 'string', description: 'The process name (e.g. "notepad.exe", "msedge.exe")' }
+          platform: { type: 'string', enum: ['youtube', 'spotify', 'generic'] },
+          action: { type: 'string', enum: ['play', 'search', 'open_channel'] },
+          query: { type: 'string' }
         },
-        required: ['appName']
+        required: ['platform', 'action', 'query']
       }
     }
   }
 ];
 
-async function handleToolCall(toolCall) {
-  const { name, arguments: argsString } = toolCall.function;
-  let args;
-  try {
-    args = JSON.parse(argsString);
-  } catch (e) {
-    console.error(`Failed to parse tool arguments: ${argsString}`);
-    return { error: 'Invalid JSON in tool arguments' };
+const toolHandlers = {
+  get_news: async (args) => {
+    const url = args.topic 
+      ? `https://newsapi.org/v2/everything?q=${encodeURIComponent(args.topic)}&pageSize=5&sortBy=publishedAt&language=en&apiKey=${process.env.NEWS_API_KEY}`
+      : `https://newsapi.org/v2/top-headlines?pageSize=5&language=en&apiKey=${process.env.NEWS_API_KEY}`;
+    const res = await fetch(url);
+    const data = await res.json();
+    return data.status === 'ok' ? { articles: data.articles.map(a => ({ title: a.title, source: a.source.name })) } : { error: 'News fetch failed' };
+  },
+
+  get_weather: async (args) => {
+    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(args.city)}&appid=${process.env.WEATHER_API_KEY}&units=metric`;
+    const res = await fetch(url);
+    const data = await res.json();
+    return data.cod === 200 ? { temp: data.main.temp, condition: data.weather[0].description, city: data.name } : { error: 'City not found' };
+  },
+
+  open_website: (args) => new Promise(resolve => {
+    let url = args.url.trim();
+    if (!url.includes('.') && !url.includes('://')) url = `https://www.google.com/search?q=${encodeURIComponent(url)}`;
+    else if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+    exec(`start "" "${url}"`, (err) => resolve(err ? { error: err.message } : { status: 'success', opened: url }));
+  }),
+
+  open_local_app: (args) => new Promise(resolve => {
+    const appMap = { 'vs code': 'code', 'chrome': 'chrome', 'notepad': 'notepad', 'calculator': 'calc', 'edge': 'msedge' };
+    const command = appMap[args.appName.toLowerCase()] || args.appName;
+    exec(`start "" ${command}`, (err) => {
+      if (!err) return resolve({ status: 'success', app: args.appName });
+      // Fallback: search system path or common locations
+      exec(`where ${command}`, (wErr, stdout) => {
+        const path = !wErr && stdout ? stdout.split('\r\n')[0].trim() : null;
+        if (path) exec(`start "" "${path}"`, (sErr) => resolve(sErr ? { error: `Failed to launch ${args.appName}` } : { status: 'success' }));
+        else resolve({ error: `App ${args.appName} not found` });
+      });
+    });
+  }),
+
+  media_control: async (args) => {
+    const { platform, action, query } = args;
+    let url = '';
+    const encodedQuery = encodeURIComponent(query);
+    if (platform === 'youtube') {
+      if (action === 'play') {
+        try {
+          console.log(`[YOUTUBE] Searching for: ${query}`);
+          const results = await ytsr(query, { limit: 15 });
+          // Filter for videos specifically
+          const video = results.items.find(i => i.type === 'video' && !i.isLive && !i.isUpcoming);
+          url = video ? video.url : `https://www.youtube.com/results?search_query=${encodedQuery}`;
+        } catch (e) { 
+          console.error('[YOUTUBE ERROR]', e.message);
+          url = `https://www.youtube.com/results?search_query=${encodedQuery}`; 
+        }
+      } else if (action === 'open_channel') {
+        url = `https://www.youtube.com/results?search_query=${encodedQuery}&sp=EgIQAg%253D%253D`;
+      } else {
+        url = `https://www.youtube.com/results?search_query=${encodedQuery}`;
+      }
+    } else if (platform === 'spotify') {
+      url = `https://open.spotify.com/search/${encodedQuery}`;
+    } else {
+      url = `https://www.google.com/search?q=play+${encodedQuery}`;
+    }
+
+    return new Promise(resolve => {
+      exec(`start "" "${url}"`, (err) => resolve(err ? { error: err.message } : { status: 'success', platform, action, url }));
+    });
   }
+};
 
-  console.log(`Executing tool: ${name}`, args);
-
-  switch (name) {
-    case 'get_news':
-      return new Promise(async (resolve) => {
-        try {
-          const topic = args.topic;
-          const url = topic 
-            ? `https://newsapi.org/v2/everything?q=${encodeURIComponent(topic)}&pageSize=5&sortBy=publishedAt&language=en&apiKey=${process.env.NEWS_API_KEY}`
-            : `https://newsapi.org/v2/top-headlines?pageSize=5&language=en&apiKey=${process.env.NEWS_API_KEY}`;
-          const res = await fetch(url);
-          const data = await res.json();
-          if (data.status !== 'ok') resolve({ error: 'Failed to fetch news' });
-          else resolve({ status: 'success', articles: data.articles.map(a => ({ title: a.title, source: a.source.name })) });
-        } catch (e) {
-          resolve({ error: e.message });
-        }
-      });
-
-    case 'get_weather':
-      return new Promise(async (resolve) => {
-        try {
-          const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(args.city)}&appid=${process.env.WEATHER_API_KEY}&units=metric`;
-          const res = await fetch(url);
-          const data = await res.json();
-          if (data.cod !== 200) resolve({ error: 'City not found' });
-          else resolve({ status: 'success', data: { temp: data.main.temp, condition: data.weather[0].description, city: data.name } });
-        } catch (e) {
-          resolve({ error: e.message });
-        }
-      });
-
-    case 'open_website':
-      return new Promise((resolve) => {
-        let url = args.url.trim();
-        if (!/^https?:\/\//i.test(url)) {
-          url = 'https://' + url;
-        }
-        exec(`start ${url}`, (err) => {
-          if (err) resolve({ error: `Failed to open website: ${err.message}` });
-          else resolve({ status: 'success', message: `Opened ${url}` });
-        });
-      });
-
-    case 'open_local_app':
-      return new Promise((resolve) => {
-        let command = args.appName.toLowerCase();
-        
-        // Common App Mappings
-        const appMap = {
-          'vs code': 'code',
-          'visual studio code': 'code',
-          'microsoft edge': 'msedge',
-          'edge': 'msedge',
-          'chrome': 'chrome',
-          'google chrome': 'chrome',
-          'notepad': 'notepad',
-          'calculator': 'calc',
-          'calc': 'calc',
-          'steam': 'steam',
-          'vlc': 'vlc',
-          'spotify': 'spotify',
-          'discord': 'discord',
-          'slack': 'slack',
-          'zoom': 'zoom',
-          'brave': 'brave'
-        };
-
-        if (appMap[command]) {
-          command = appMap[command];
-        }
-
-        // Try 'start' first
-        exec(`start ${command}`, (err) => {
-          if (err) {
-            // Check if it's in PATH via 'where'
-            exec(`where ${command}`, (whereErr, stdout) => {
-              if (!whereErr && stdout) {
-                const exePath = stdout.split('\r\n')[0].trim();
-                exec(`start "" "${exePath}"`, (startErr) => {
-                  if (startErr) resolve({ error: `Could not launch ${command} even after finding it.` });
-                  else resolve({ status: 'success', message: `Launched ${command} from system path.` });
-                });
-              } else {
-                // Fallback: Check common installation paths
-                const fallbacks = {
-                  'steam': '"C:\\Program Files (x86)\\Steam\\steam.exe"',
-                  'code': '"C:\\Users\\' + (process.env.USERNAME || '') + '\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe"',
-                  'msedge': '"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"',
-                  'chrome': '"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe"',
-                  'brave': '"C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"'
-                };
-
-                if (fallbacks[command]) {
-                  exec(`start "" ${fallbacks[command]}`, (fallbackErr) => {
-                    if (fallbackErr) resolve({ error: `Could not find ${args.appName} in standard locations.` });
-                    else resolve({ status: 'success', message: `Launched ${args.appName} via fallback path.` });
-                  });
-                } else {
-                  resolve({ error: `Failed to open app ${args.appName}.` });
-                }
-              }
-            });
-          } else {
-            resolve({ status: 'success', message: `Launched ${args.appName}` });
-          }
-        });
-      });
-
-    case 'close_local_app':
-      return new Promise((resolve) => {
-        let processName = args.appName.toLowerCase();
-        if (!processName.endsWith('.exe')) processName += '.exe';
-        exec(`taskkill /IM ${processName} /F`, (err) => {
-          if (err) resolve({ error: `Failed to close ${args.appName}. Maybe it's not running?` });
-          else resolve({ status: 'success', message: `Closed ${args.appName}` });
-        });
-      });
-
-    default:
-      return { error: 'Unknown tool' };
+async function handleToolCall(toolCall) {
+  const { name, arguments: argsStr } = toolCall.function;
+  try {
+    const args = JSON.parse(argsStr);
+    const handler = toolHandlers[name];
+    console.log(`[EXEC] Tool: ${name}`, args);
+    const result = handler ? await handler(args) : 
+                   (name === 'youtube_control' ? await toolHandlers.media_control({ ...args, platform: 'youtube' }) : { error: `Unknown tool: ${name}` });
+    console.log(`[RESULT] Tool: ${name}`, result);
+    return result;
+  } catch (e) {
+    return { error: 'Invalid tool arguments' };
   }
 }
 
@@ -264,74 +210,61 @@ app.post('/api/chat', async (req, res) => {
   try {
     const { messages, model, stream } = req.body;
     
-    // Save User Message (last one in array)
     const userMsg = messages[messages.length - 1];
-    if (userMsg && userMsg.role === 'user') {
-      saveMessage('user', userMsg.content);
-    }
+    if (userMsg?.role === 'user') saveMessage('user', userMsg.content);
 
-    console.log(`Received request for model: ${model}`);
-    
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({
-        model,
-        messages,
-        tools: tools,
-        tool_choice: 'auto',
-      }),
+      body: JSON.stringify({ model, messages, tools, tool_choice: 'auto' }),
     });
 
     let data = await response.json();
     
-    // Fallback for Llama 3 malformed tool calls
-    if (data.error && data.error.code === 'tool_use_failed' && data.error.failed_generation) {
-      console.log('Attempting manual parse of failed generation...');
-      const fg = data.error.failed_generation;
-      const match = fg.match(/<function=([\w_]+).*?>?({.*?})<\/function>/i);
+    // Hallucination Fallback
+    const content = data.choices?.[0]?.message?.content || '';
+    const errorFg = data.error?.failed_generation || '';
+    
+    if (content.includes('<function') || errorFg.includes('<function') || data.error?.code === 'tool_use_failed') {
+      const fg = errorFg || content;
+      const match = fg.match(/<function=([\w_]+)[^>]*>({[\s\S]*?})(?:<\/function>|<function>|\/function|)?/i) || 
+                    fg.match(/([\w_]+)\(({[\s\S]*?})\)/); 
       
       if (match) {
         const toolName = match[1];
-        const toolArgs = match[2];
-        data = {
-          choices: [{
-            message: {
-              role: 'assistant',
-              tool_calls: [{
-                id: 'manual_' + Date.now(),
-                function: { name: toolName, arguments: toolArgs }
-              }]
-            }
-          }]
-        };
-      } else {
-        return res.status(400).json(data);
+        let toolArgs = match[2];
+        try {
+          const lastBrace = toolArgs.lastIndexOf('}');
+          if (lastBrace !== -1) toolArgs = toolArgs.substring(0, lastBrace + 1);
+          JSON.parse(toolArgs);
+          data = { choices: [{ message: { role: 'assistant', tool_calls: [{ id: `m_${Date.now()}`, function: { name: toolName, arguments: toolArgs } }] } }] };
+          console.log(`[MANUAL PARSE] ${toolName}`);
+        } catch {}
       }
     }
 
-    if (!data.choices || data.choices.length === 0) {
-      console.error('Groq API Error:', data);
-      return res.status(500).json({ error: 'Invalid response from AI' });
+    if (!data.choices?.length) {
+      console.error('Groq Error:', data);
+      return res.status(500).json({ error: 'AI Error' });
     }
 
     const message = data.choices[0].message;
 
-    if (message.tool_calls && message.tool_calls.length > 0) {
+    if (message.tool_calls?.length) {
       const toolMessages = [...messages, message];
-      
       for (const toolCall of message.tool_calls) {
-        const toolResult = await handleToolCall(toolCall);
-        toolMessages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          name: toolCall.function.name,
-          content: JSON.stringify(toolResult),
-        });
+        const result = await handleToolCall(toolCall);
+        toolMessages.push({ role: 'tool', tool_call_id: toolCall.id, name: toolCall.function.name, content: JSON.stringify(result) });
       }
+
+      // Inject a strictly conversational reminder to prevent JSON hallucinations in the second pass
+      toolMessages.push({ 
+        role: 'system', 
+        content: 'Action complete. Now provide a concise, natural language summary. ABSOLUTELY NO JSON, NO code, and NO tool tags in your response.' 
+      });
 
       const finalResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
         method: 'POST',
@@ -339,33 +272,25 @@ app.post('/api/chat', async (req, res) => {
           'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          model,
-          messages: toolMessages,
-          stream: stream
-        }),
+        body: JSON.stringify({ model, messages: toolMessages, stream }),
       });
 
       if (!stream) {
         const finalData = await finalResponse.json();
-        saveMessage('assistant', finalData.choices[0].message.content);
+        const reply = finalData.choices?.[0]?.message?.content || "";
+        saveMessage('assistant', reply);
         return res.json(finalData);
       }
 
       res.setHeader('Content-Type', 'text/event-stream');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      
       let fullText = '';
       finalResponse.body.on('data', (chunk) => {
-        const str = chunk.toString();
-        // Extract content from SSE data
-        const lines = str.split('\n').filter(l => l.startsWith('data: '));
+        const lines = chunk.toString().split('\n').filter(l => l.startsWith('data: '));
         for (const line of lines) {
-          const rawData = line.replace('data: ', '').trim();
-          if (rawData === '[DONE]') continue;
+          const raw = line.replace('data: ', '').trim();
+          if (raw === '[DONE]') continue;
           try {
-            const json = JSON.parse(rawData);
+            const json = JSON.parse(raw);
             fullText += json.choices?.[0]?.delta?.content || '';
           } catch {}
         }
@@ -378,35 +303,34 @@ app.post('/api/chat', async (req, res) => {
       return;
     }
 
-    // No tool call, just return or stream the original response content
-    let content = message.content || "I'm sorry, I couldn't process that.";
-    
-    // Safety check: Clean out any rogue tool tags the model might have hallucinated in the text
-    content = content.replace(/<function.*?>.*?<\/function>/gi, '');
-    content = content.replace(/<tool_call.*?>.*?<\/tool_call>/gi, '');
+    // No tool call
+    let finalContent = message.content || "I'm sorry, I couldn't process that.";
+    // Aggressive cleaning of tool-related hallucinations
+    finalContent = finalContent
+      .replace(/<function.*?>.*?<\/function>/gi, '')
+      .replace(/<tool_call.*?>.*?<\/tool_call>/gi, '')
+      .replace(/{\s*"platform":[\s\S]*?}/gi, '')
+      .replace(/{\s*"action":[\s\S]*?}/gi, '')
+      .trim();
 
     if (!stream) {
-      saveMessage('assistant', content);
-      return res.json({ ...data, choices: [{ ...data.choices[0], message: { ...data.choices[0].message, content } }] });
+      saveMessage('assistant', finalContent);
+      return res.json({ ...data, choices: [{ ...data.choices[0], message: { ...data.choices[0].message, content: finalContent } }] });
     }
 
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.write(`data: ${JSON.stringify({
-      choices: [{ delta: { content: content } }]
-    })}\n\n`);
+    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: finalContent } }] })}\n\n`);
     res.write('data: [DONE]\n\n');
     res.end();
-    saveMessage('assistant', content);
+    saveMessage('assistant', finalContent);
 
   } catch (error) {
-    console.error('Groq Proxy Error:', error);
-    res.status(500).json({ error: 'Internal Server Error' });
+    console.error('Proxy Error:', error);
+    res.status(500).json({ error: 'Server Error' });
   }
 });
 
-// --- News API Proxy ---
+// --- API Proxies ---
 app.get('/api/news', async (req, res) => {
   try {
     const { topic } = req.query;
@@ -414,26 +338,16 @@ app.get('/api/news', async (req, res) => {
       ? `https://newsapi.org/v2/everything?q=${encodeURIComponent(topic)}&pageSize=5&sortBy=publishedAt&language=en&apiKey=${process.env.NEWS_API_KEY}`
       : `https://newsapi.org/v2/top-headlines?pageSize=5&language=en&apiKey=${process.env.NEWS_API_KEY}`;
     const response = await fetch(url);
-    const data = await response.json();
-    res.json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
+    res.json(await response.json());
+  } catch { res.status(500).send(); }
 });
 
-// --- Weather API Proxy ---
 app.get('/api/weather', async (req, res) => {
   try {
-    const { city } = req.query;
-    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(city)}&appid=${process.env.WEATHER_API_KEY}&units=metric`;
+    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(req.query.city)}&appid=${process.env.WEATHER_API_KEY}&units=metric`;
     const response = await fetch(url);
-    const data = await response.json();
-    res.json(data);
-  } catch (error) {
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
+    res.json(await response.json());
+  } catch { res.status(500).send(); }
 });
 
-app.listen(PORT, () => {
-  console.log(`J.A.R.V.I.S Backend running on http://localhost:${PORT}`);
-});
+app.listen(PORT, () => console.log(`J.A.R.V.I.S on port ${PORT}`));
