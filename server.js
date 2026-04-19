@@ -66,10 +66,10 @@ const tools = [
     type: 'function',
     function: {
       name: 'open_website',
-      description: 'Open a website or search query in the browser.',
+      description: 'Open a specific website homepage (e.g., YouTube, Facebook, Twitter) or a search query.',
       parameters: {
         type: 'object',
-        properties: { url: { type: 'string', description: 'URL or search query' } },
+        properties: { url: { type: 'string', description: 'Domain name or search query' } },
         required: ['url']
       }
     }
@@ -90,13 +90,13 @@ const tools = [
     type: 'function',
     function: {
       name: 'media_control',
-      description: 'Play/Search music or videos on YouTube, Spotify, etc.',
+      description: 'Used ONLY for playing specific songs or searching for specific videos. Use open_website for general navigation.',
       parameters: {
         type: 'object',
         properties: {
           platform: { type: 'string', enum: ['youtube', 'spotify', 'generic'] },
           action: { type: 'string', enum: ['play', 'search', 'open_channel'] },
-          query: { type: 'string' }
+          query: { type: 'string', description: 'Song name, video title, or channel name' }
         },
         required: ['platform', 'action', 'query']
       }
@@ -205,13 +205,36 @@ app.get('/api/history', (req, res) => {
   });
 });
 
+// --- Phonetic Correction Layer ---
+const VOCAB_MAP = {
+  'guitar': 'github',
+  'get hub': 'github',
+  'zervas': 'jarvis',
+  'service': 'jarvis',
+  'open you to': 'open youtube',
+  'play star boy': 'play starboy',
+  'open vs': 'open vscode'
+};
+
+function correctPhonetics(text) {
+  let corrected = text.toLowerCase();
+  for (const [wrong, right] of Object.entries(VOCAB_MAP)) {
+    corrected = corrected.replace(new RegExp(`\\b${wrong}\\b`, 'gi'), right);
+  }
+  return corrected;
+}
+
 // --- Groq AI Proxy ---
 app.post('/api/chat', async (req, res) => {
   try {
     const { messages, model, stream } = req.body;
     
+    // Correct the latest user message
     const userMsg = messages[messages.length - 1];
-    if (userMsg?.role === 'user') saveMessage('user', userMsg.content);
+    if (userMsg?.role === 'user') {
+      userMsg.content = correctPhonetics(userMsg.content);
+      saveMessage('user', userMsg.content);
+    }
 
     const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
@@ -263,7 +286,7 @@ app.post('/api/chat', async (req, res) => {
       // Inject a strictly conversational reminder to prevent JSON hallucinations in the second pass
       toolMessages.push({ 
         role: 'system', 
-        content: 'Action complete. Now provide a concise, natural language summary. ABSOLUTELY NO JSON, NO code, and NO tool tags in your response.' 
+        content: 'IMPORTANT: Task already executed. NO JSON, NO code, NO <tags>. Just talk to master naturally. If you output any { or <, master will be angry. Just say: "As you wish master, I have [action]..." or similar.' 
       });
 
       const finalResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
@@ -330,24 +353,15 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-// --- API Proxies ---
+// --- API Proxies (Used by Dashboard Widgets) ---
 app.get('/api/news', async (req, res) => {
-  try {
-    const { topic } = req.query;
-    const url = topic 
-      ? `https://newsapi.org/v2/everything?q=${encodeURIComponent(topic)}&pageSize=5&sortBy=publishedAt&language=en&apiKey=${process.env.NEWS_API_KEY}`
-      : `https://newsapi.org/v2/top-headlines?pageSize=5&language=en&apiKey=${process.env.NEWS_API_KEY}`;
-    const response = await fetch(url);
-    res.json(await response.json());
-  } catch { res.status(500).send(); }
+  const result = await toolHandlers.get_news(req.query);
+  res.json(result);
 });
 
 app.get('/api/weather', async (req, res) => {
-  try {
-    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(req.query.city)}&appid=${process.env.WEATHER_API_KEY}&units=metric`;
-    const response = await fetch(url);
-    res.json(await response.json());
-  } catch { res.status(500).send(); }
+  const result = await toolHandlers.get_weather(req.query);
+  res.json(result);
 });
 
 app.listen(PORT, () => console.log(`J.A.R.V.I.S on port ${PORT}`));
