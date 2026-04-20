@@ -218,6 +218,3 @@ From `package.json`:
 
 ---
 
-## 10) 💡 Recommended Next Improvement
-
-Create a `.env.example` file with placeholders so setup is easier and secrets are never shared.
