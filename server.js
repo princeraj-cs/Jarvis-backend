@@ -4,11 +4,32 @@ const fetch = require('node-fetch');
 const ytsr = require('ytsr');
 const { exec } = require('child_process');
 const path = require('path');
+const os = require('os');
 const sqlite3 = require('sqlite3').verbose();
 require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+
+// --- System Telemetry ---
+app.get('/api/system', (req, res) => {
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const usedMem = totalMem - freeMem;
+  const memUsage = (usedMem / totalMem) * 100;
+  
+  // CPU usage is tricky in Node without libraries, so we use a loadavg approximation
+  const load = os.loadavg();
+  const cpuUsage = (load[0] * 100 / os.cpus().length).toFixed(1);
+
+  res.json({
+    cpu: Math.min(100, parseFloat(cpuUsage)),
+    memory: parseFloat(memUsage.toFixed(1)),
+    uptime: os.uptime(),
+    platform: os.platform(),
+    hostname: os.hostname()
+  });
+});
 
 // --- Database Setup ---
 const db = new sqlite3.Database(path.join(__dirname, 'jarvis.db'), (err) => {
@@ -106,72 +127,95 @@ const tools = [
 
 const toolHandlers = {
   get_news: async (args) => {
-    const url = args.topic 
-      ? `https://newsapi.org/v2/everything?q=${encodeURIComponent(args.topic)}&pageSize=5&sortBy=publishedAt&language=en&apiKey=${process.env.NEWS_API_KEY}`
-      : `https://newsapi.org/v2/top-headlines?pageSize=5&language=en&apiKey=${process.env.NEWS_API_KEY}`;
-    const res = await fetch(url);
-    const data = await res.json();
-    return data.status === 'ok' ? { articles: data.articles.map(a => ({ title: a.title, source: a.source.name })) } : { error: 'News fetch failed' };
+    try {
+      if (!process.env.NEWS_API_KEY) return { error: 'News API key missing' };
+      const url = args.topic 
+        ? `https://newsapi.org/v2/everything?q=${encodeURIComponent(args.topic)}&pageSize=5&sortBy=publishedAt&language=en&apiKey=${process.env.NEWS_API_KEY}`
+        : `https://newsapi.org/v2/top-headlines?pageSize=5&language=en&apiKey=${process.env.NEWS_API_KEY}`;
+      const res = await fetch(url);
+      const data = await res.json();
+      return data.status === 'ok' ? { articles: data.articles.map(a => ({ title: a.title, source: a.source.name })) } : { error: data.message || 'News fetch failed' };
+    } catch (e) {
+      console.error('[TOOL ERROR] News:', e.message);
+      return { error: 'News service currently unavailable' };
+    }
   },
 
   get_weather: async (args) => {
-    const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(args.city)}&appid=${process.env.WEATHER_API_KEY}&units=metric`;
-    const res = await fetch(url);
-    const data = await res.json();
-    return data.cod === 200 ? { temp: data.main.temp, condition: data.weather[0].description, city: data.name } : { error: 'City not found' };
+    try {
+      if (!process.env.WEATHER_API_KEY) return { error: 'Weather API key missing' };
+      const url = `https://api.openweathermap.org/data/2.5/weather?q=${encodeURIComponent(args.city)}&appid=${process.env.WEATHER_API_KEY}&units=metric`;
+      const res = await fetch(url);
+      const data = await res.json();
+      return data.cod === 200 ? { temp: data.main.temp, condition: data.weather[0].description, city: data.name } : { error: data.message || 'City not found' };
+    } catch (e) {
+      console.error('[TOOL ERROR] Weather:', e.message);
+      return { error: 'Weather service currently unavailable' };
+    }
   },
 
   open_website: (args) => new Promise(resolve => {
-    let url = args.url.trim();
-    if (!url.includes('.') && !url.includes('://')) url = `https://www.google.com/search?q=${encodeURIComponent(url)}`;
-    else if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
-    exec(`start "" "${url}"`, (err) => resolve(err ? { error: err.message } : { status: 'success', opened: url }));
+    try {
+      let url = args.url.trim();
+      if (!url.includes('.') && !url.includes('://')) url = `https://www.google.com/search?q=${encodeURIComponent(url)}`;
+      else if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+      exec(`start "" "${url}"`, (err) => resolve(err ? { error: err.message } : { status: 'success', opened: url }));
+    } catch (e) {
+      resolve({ error: 'Failed to open website' });
+    }
   }),
 
   open_local_app: (args) => new Promise(resolve => {
-    const appMap = { 'vs code': 'code', 'chrome': 'chrome', 'notepad': 'notepad', 'calculator': 'calc', 'edge': 'msedge' };
-    const command = appMap[args.appName.toLowerCase()] || args.appName;
-    exec(`start "" ${command}`, (err) => {
-      if (!err) return resolve({ status: 'success', app: args.appName });
-      // Fallback: search system path or common locations
-      exec(`where ${command}`, (wErr, stdout) => {
-        const path = !wErr && stdout ? stdout.split('\r\n')[0].trim() : null;
-        if (path) exec(`start "" "${path}"`, (sErr) => resolve(sErr ? { error: `Failed to launch ${args.appName}` } : { status: 'success' }));
-        else resolve({ error: `App ${args.appName} not found` });
+    try {
+      const appMap = { 'vs code': 'code', 'chrome': 'chrome', 'notepad': 'notepad', 'calculator': 'calc', 'edge': 'msedge' };
+      const command = appMap[args.appName.toLowerCase()] || args.appName;
+      exec(`start "" ${command}`, (err) => {
+        if (!err) return resolve({ status: 'success', app: args.appName });
+        // Fallback: search system path or common locations
+        exec(`where ${command}`, (wErr, stdout) => {
+          const path = !wErr && stdout ? stdout.split('\r\n')[0].trim() : null;
+          if (path) exec(`start "" "${path}"`, (sErr) => resolve(sErr ? { error: `Failed to launch ${args.appName}` } : { status: 'success' }));
+          else resolve({ error: `App ${args.appName} not found` });
+        });
       });
-    });
+    } catch (e) {
+      resolve({ error: 'Failed to launch application' });
+    }
   }),
 
   media_control: async (args) => {
-    const { platform, action, query } = args;
-    let url = '';
-    const encodedQuery = encodeURIComponent(query);
-    if (platform === 'youtube') {
-      if (action === 'play') {
-        try {
-          console.log(`[YOUTUBE] Searching for: ${query}`);
-          const results = await ytsr(query, { limit: 15 });
-          // Filter for videos specifically
-          const video = results.items.find(i => i.type === 'video' && !i.isLive && !i.isUpcoming);
-          url = video ? video.url : `https://www.youtube.com/results?search_query=${encodedQuery}`;
-        } catch (e) { 
-          console.error('[YOUTUBE ERROR]', e.message);
-          url = `https://www.youtube.com/results?search_query=${encodedQuery}`; 
+    try {
+      const { platform, action, query } = args;
+      let url = '';
+      const encodedQuery = encodeURIComponent(query);
+      if (platform === 'youtube') {
+        if (action === 'play') {
+          try {
+            console.log(`[YOUTUBE] Searching for: ${query}`);
+            const results = await ytsr(query, { limit: 15 });
+            const video = results.items.find(i => i.type === 'video' && !i.isLive && !i.isUpcoming);
+            url = video ? video.url : `https://www.youtube.com/results?search_query=${encodedQuery}`;
+          } catch (e) { 
+            console.error('[YOUTUBE ERROR]', e.message);
+            url = `https://www.youtube.com/results?search_query=${encodedQuery}`; 
+          }
+        } else if (action === 'open_channel') {
+          url = `https://www.youtube.com/results?search_query=${encodedQuery}&sp=EgIQAg%253D%253D`;
+        } else {
+          url = `https://www.youtube.com/results?search_query=${encodedQuery}`;
         }
-      } else if (action === 'open_channel') {
-        url = `https://www.youtube.com/results?search_query=${encodedQuery}&sp=EgIQAg%253D%253D`;
+      } else if (platform === 'spotify') {
+        url = `https://open.spotify.com/search/${encodedQuery}`;
       } else {
-        url = `https://www.youtube.com/results?search_query=${encodedQuery}`;
+        url = `https://www.google.com/search?q=play+${encodedQuery}`;
       }
-    } else if (platform === 'spotify') {
-      url = `https://open.spotify.com/search/${encodedQuery}`;
-    } else {
-      url = `https://www.google.com/search?q=play+${encodedQuery}`;
-    }
 
-    return new Promise(resolve => {
-      exec(`start "" "${url}"`, (err) => resolve(err ? { error: err.message } : { status: 'success', platform, action, url }));
-    });
+      return new Promise(resolve => {
+        exec(`start "" "${url}"`, (err) => resolve(err ? { error: err.message } : { status: 'success', platform, action, url }));
+      });
+    } catch (e) {
+      return { error: 'Media control failed' };
+    }
   }
 };
 
@@ -206,28 +250,39 @@ app.get('/api/history', (req, res) => {
 });
 
 // --- Phonetic Correction Layer ---
-const VOCAB_MAP = {
-  'guitar': 'github',
-  'get hub': 'github',
-  'zervas': 'jarvis',
-  'service': 'jarvis',
-  'open you to': 'open youtube',
-  'play star boy': 'play starboy',
-  'open vs': 'open vscode'
-};
-
 function correctPhonetics(text) {
+  if (!text) return '';
   let corrected = text.toLowerCase();
-  for (const [wrong, right] of Object.entries(VOCAB_MAP)) {
-    corrected = corrected.replace(new RegExp(`\\b${wrong}\\b`, 'gi'), right);
+  
+  // Specific JARVIS mappings
+  const MAP = {
+    'guitar': 'github',
+    'get hub': 'github',
+    'zervas': 'jarvis',
+    'service': 'jarvis',
+    'jarvis': 'jarvis',
+    'open you to': 'open youtube',
+    'play star boy': 'play starboy',
+    'open vs': 'open vscode',
+    'vs code': 'vscode',
+    'open chrome': 'open chrome',
+    'search on google': 'search google',
+    'tell me the weather': 'get weather'
+  };
+
+  for (const [wrong, right] of Object.entries(MAP)) {
+    // Use word boundaries for precise matching
+    const regex = new RegExp(`\\b${wrong}\\b`, 'gi');
+    corrected = corrected.replace(regex, right);
   }
+  
   return corrected;
 }
 
 // --- Groq AI Proxy ---
 app.post('/api/chat', async (req, res) => {
   try {
-    const { messages, model, stream } = req.body;
+    const { messages, model, stream: clientRequestedStream } = req.body;
     
     // Correct the latest user message
     const userMsg = messages[messages.length - 1];
@@ -236,45 +291,112 @@ app.post('/api/chat', async (req, res) => {
       saveMessage('user', userMsg.content);
     }
 
-    const response = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    // Function to stream from Groq to our client
+    async function streamGroqResponse(groqMessages, isToolPass = false) {
+      const groqResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ 
+          model, 
+          messages: groqMessages, 
+          tools: isToolPass ? undefined : tools, 
+          tool_choice: isToolPass ? undefined : 'auto',
+          stream: true 
+        }),
+      });
+
+      if (!groqResponse.ok) {
+        const errorData = await groqResponse.json();
+        throw new Error(errorData.error?.message || 'Groq API Error');
+      }
+
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+
+      let fullText = '';
+      let toolCalls = [];
+      let currentToolCall = null;
+
+      for await (const chunk of groqResponse.body) {
+        const lines = chunk.toString().split('\n');
+        for (const line of lines) {
+          if (!line.trim() || line.startsWith(':')) continue;
+          if (line.trim() === 'data: [DONE]') {
+            if (toolCalls.length > 0) return { toolCalls };
+            res.write('data: [DONE]\n\n');
+            saveMessage('assistant', fullText);
+            return { fullText };
+          }
+
+          try {
+            const data = JSON.parse(line.replace('data: ', ''));
+            const delta = data.choices[0].delta;
+
+            if (delta.tool_calls) {
+              for (const tc of delta.tool_calls) {
+                if (tc.index !== undefined) {
+                  if (!toolCalls[tc.index]) toolCalls[tc.index] = { id: tc.id, function: { name: '', arguments: '' } };
+                  currentToolCall = toolCalls[tc.index];
+                }
+                if (tc.function?.name) currentToolCall.function.name += tc.function.name;
+                if (tc.function?.arguments) currentToolCall.function.arguments += tc.function.arguments;
+              }
+            } else if (delta.content) {
+              fullText += delta.content;
+              res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: delta.content } }] })}\n\n`);
+            }
+          } catch (e) {
+            // Partial JSON or other error, ignore
+          }
+        }
+      }
+      return { fullText, toolCalls };
+    }
+
+    // First Pass
+    let firstPassResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify({ model, messages, tools, tool_choice: 'auto' }),
+      body: JSON.stringify({ model, messages, tools, tool_choice: 'auto', stream: false }),
     });
 
-    let data = await response.json();
-    
-    // Hallucination Fallback
-    const content = data.choices?.[0]?.message?.content || '';
-    const errorFg = data.error?.failed_generation || '';
-    
-    if (content.includes('<function') || errorFg.includes('<function') || data.error?.code === 'tool_use_failed') {
-      const fg = errorFg || content;
-      const match = fg.match(/<function=([\w_]+)[^>]*>({[\s\S]*?})(?:<\/function>|<function>|\/function|)?/i) || 
-                    fg.match(/([\w_]+)\(({[\s\S]*?})\)/); 
+    if (!firstPassResponse.ok) {
+      const errorData = await firstPassResponse.json().catch(() => ({}));
+      const status = firstPassResponse.status;
+      console.error(`[GROQ ERROR] Status: ${status}`, errorData);
       
-      if (match) {
-        const toolName = match[1];
-        let toolArgs = match[2];
-        try {
-          const lastBrace = toolArgs.lastIndexOf('}');
-          if (lastBrace !== -1) toolArgs = toolArgs.substring(0, lastBrace + 1);
-          JSON.parse(toolArgs);
-          data = { choices: [{ message: { role: 'assistant', tool_calls: [{ id: `m_${Date.now()}`, function: { name: toolName, arguments: toolArgs } }] } }] };
-          console.log(`[MANUAL PARSE] ${toolName}`);
-        } catch {}
+      if (status === 401) return res.status(401).json({ error: 'Invalid Groq API Key. Please check your .env file.' });
+      if (status === 429) return res.status(429).json({ error: 'Rate limit reached. Please wait a moment.' });
+      return res.status(status).json({ error: errorData.error?.message || 'AI service unavailable' });
+    }
+
+    let data = await firstPassResponse.json();
+    let message = data.choices?.[0]?.message;
+
+    // Hallucination Fallback (Non-streaming for tool detection is safer)
+    if (!message || data.error) {
+      const content = data.choices?.[0]?.message?.content || '';
+      const errorFg = data.error?.failed_generation || '';
+      if (content.includes('<function') || errorFg.includes('<function') || data.error?.code === 'tool_use_failed') {
+        const fg = errorFg || content;
+        const match = fg.match(/<function=([\w_]+)[^>]*>({[\s\S]*?})(?:<\/function>|<function>|\/function|)?/i) || 
+                      fg.match(/([\w_]+)\(({[\s\S]*?})\)/); 
+        if (match) {
+          message = { role: 'assistant', tool_calls: [{ id: `m_${Date.now()}`, function: { name: match[1], arguments: match[2] } }] };
+        }
       }
     }
 
-    if (!data.choices?.length) {
-      console.error('Groq Error:', data);
-      return res.status(500).json({ error: 'AI Error' });
+    if (!message) {
+      return res.status(500).json({ error: 'AI returned an empty response' });
     }
-
-    const message = data.choices[0].message;
 
     if (message.tool_calls?.length) {
       const toolMessages = [...messages, message];
@@ -283,73 +405,36 @@ app.post('/api/chat', async (req, res) => {
         toolMessages.push({ role: 'tool', tool_call_id: toolCall.id, name: toolCall.function.name, content: JSON.stringify(result) });
       }
 
-      // Inject a strictly conversational reminder to prevent JSON hallucinations in the second pass
       toolMessages.push({ 
         role: 'system', 
-        content: 'IMPORTANT: Task already executed. NO JSON, NO code, NO <tags>. Just talk to master naturally. If you output any { or <, master will be angry. Just say: "As you wish master, I have [action]..." or similar.' 
+        content: 'Task done. Now tell master naturally about it. NO JSON, NO tags. Just clean speech.' 
       });
 
-      const finalResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ model, messages: toolMessages, stream }),
-      });
-
-      if (!stream) {
-        const finalData = await finalResponse.json();
-        const reply = finalData.choices?.[0]?.message?.content || "";
-        saveMessage('assistant', reply);
-        return res.json(finalData);
-      }
+      await streamGroqResponse(toolMessages, true);
+    } else {
+      // Direct response - we already have it from the first pass (non-streaming for tool detection)
+      // But to provide a "streaming" feel, we can just send it back as one or more SSE chunks
+      let finalContent = message.content || "I'm sorry, I couldn't process that.";
+      finalContent = finalContent
+        .replace(/<function.*?>.*?<\/function>/gi, '')
+        .replace(/<tool_call.*?>.*?<\/tool_call>/gi, '')
+        .trim();
 
       res.setHeader('Content-Type', 'text/event-stream');
-      let fullText = '';
-      finalResponse.body.on('data', (chunk) => {
-        const lines = chunk.toString().split('\n').filter(l => l.startsWith('data: '));
-        for (const line of lines) {
-          const raw = line.replace('data: ', '').trim();
-          if (raw === '[DONE]') continue;
-          try {
-            const json = JSON.parse(raw);
-            fullText += json.choices?.[0]?.delta?.content || '';
-          } catch {}
-        }
-        res.write(chunk);
-      });
-      finalResponse.body.on('end', () => {
-        if (fullText) saveMessage('assistant', fullText);
-        res.end();
-      });
-      return;
-    }
-
-    // No tool call
-    let finalContent = message.content || "I'm sorry, I couldn't process that.";
-    // Aggressive cleaning of tool-related hallucinations
-    finalContent = finalContent
-      .replace(/<function.*?>.*?<\/function>/gi, '')
-      .replace(/<tool_call.*?>.*?<\/tool_call>/gi, '')
-      .replace(/{\s*"platform":[\s\S]*?}/gi, '')
-      .replace(/{\s*"action":[\s\S]*?}/gi, '')
-      .trim();
-
-    if (!stream) {
+      res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: finalContent } }] })}\n\n`);
+      res.write('data: [DONE]\n\n');
       saveMessage('assistant', finalContent);
-      return res.json({ ...data, choices: [{ ...data.choices[0], message: { ...data.choices[0].message, content: finalContent } }] });
+      res.end();
     }
-
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: finalContent } }] })}\n\n`);
-    res.write('data: [DONE]\n\n');
-    res.end();
-    saveMessage('assistant', finalContent);
 
   } catch (error) {
     console.error('Proxy Error:', error);
-    res.status(500).json({ error: 'Server Error' });
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Server Error' });
+    } else {
+      res.write(`data: ${JSON.stringify({ error: 'Stream error' })}\n\n`);
+      res.end();
+    }
   }
 });
 
