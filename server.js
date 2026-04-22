@@ -244,14 +244,26 @@ async function handleToolCall(toolCall) {
   const { name, arguments: argsStr } = toolCall.function;
   try {
     const args = JSON.parse(argsStr);
-    const handler = toolHandlers[name];
-    console.log(`[EXEC] Tool: ${name}`, args);
-    const result = handler ? await handler(args) : 
-                   (name === 'youtube_control' ? await toolHandlers.media_control({ ...args, platform: 'youtube' }) : { error: `Unknown tool: ${name}` });
+    
+    // Fuzzy matching for tool names
+    const normalizedName = name.toLowerCase().replace(/[^a-z0-9_]/g, '');
+    const handler = toolHandlers[normalizedName] || toolHandlers[name];
+    
+    console.log(`[EXEC] Tool: ${name} (Normalized: ${normalizedName})`, args);
+    
+    let result;
+    if (handler) {
+      result = await handler(args);
+    } else if (normalizedName.includes('media') || normalizedName.includes('youtube') || normalizedName.includes('control')) {
+      result = await toolHandlers.media_control({ ...args, platform: args.platform || 'youtube' });
+    } else {
+      result = { error: `I'm sorry, I don't know how to use the tool "${name}" yet.` };
+    }
+
     console.log(`[RESULT] Tool: ${name}`, result);
     return result;
   } catch (e) {
-    return { error: 'Invalid tool arguments' };
+    return { error: 'Invalid tool arguments format.' };
   }
 }
 
@@ -364,7 +376,7 @@ app.post('/api/chat', async (req, res) => {
             if (delta.tool_calls) {
               for (const tc of delta.tool_calls) {
                 if (tc.index !== undefined) {
-                  if (!toolCalls[tc.index]) toolCalls[tc.index] = { id: tc.id, function: { name: '', arguments: '' } };
+                  if (!toolCalls[tc.index]) toolCalls[tc.index] = { id: tc.id, type: 'function', function: { name: '', arguments: '' } };
                   currentToolCall = toolCalls[tc.index];
                 }
                 if (tc.function?.name) currentToolCall.function.name += tc.function.name;
@@ -407,17 +419,21 @@ app.post('/api/chat', async (req, res) => {
     let message = data.choices?.[0]?.message;
 
     // Hallucination Fallback (Non-streaming for tool detection is safer)
-    if (!message || (message.content && message.content.includes('function='))) {
+    if (!message || (message.content && (message.content.includes('function=') || message.content.includes('<function')))) {
       const content = message?.content || (data.error?.failed_generation || '');
-      if (content.includes('function=') || content.includes('<function')) {
-        // Match <function=name>{json} OR (function=name>key=value OR name({json})
-        const match = content.match(/<function=([\w_]+)[^>]*>({[\s\S]*?})/i) || 
-                      content.match(/\(function=([\w_]+)>([\s\S]*?)(?:\)|$)/i) ||
-                      content.match(/([\w_]+)\(({[\s\S]*?})\)/); 
+      const detectedToolCalls = [];
+      
+      const patterns = [
+        /<function=([\w_]+)[^>]*>({[\s\S]*?})/gi,
+        /\(function=([\w_]+)>([\s\S]*?)(?:\)|$)/gi,
+        /([\w_]+)\(({[\s\S]*?})\)/gi,
+        /function[_\s]([\w_]+)[\s:]*({[\s\S]*?})/gi
+      ];
 
-        if (match) {
+      patterns.forEach(regex => {
+        let match;
+        while ((match = regex.exec(content)) !== null) {
           let args = match[2].trim();
-          // If args look like key=value, convert to JSON
           if (!args.startsWith('{') && args.includes('=')) {
             const obj = {};
             args.split(',').forEach(pair => {
@@ -426,8 +442,16 @@ app.post('/api/chat', async (req, res) => {
             });
             args = JSON.stringify(obj);
           }
-          message = { role: 'assistant', tool_calls: [{ id: `m_${Date.now()}`, function: { name: match[1], arguments: args } }] };
+          detectedToolCalls.push({ 
+            id: `m_${Date.now()}_${detectedToolCalls.length}`, 
+            type: 'function', 
+            function: { name: match[1], arguments: args } 
+          });
         }
+      });
+
+      if (detectedToolCalls.length > 0) {
+        message = { role: 'assistant', tool_calls: detectedToolCalls };
       }
     }
 
@@ -444,7 +468,7 @@ app.post('/api/chat', async (req, res) => {
 
       toolMessages.push({ 
         role: 'system', 
-        content: 'Task done. Now tell master naturally about it. NO JSON, NO tags. Just clean speech.' 
+        content: 'Task attempted. Now tell master naturally about the result. If it was successful, be brief and professional. If it failed or there was an error, apologize sincerely and explain why if you can. NO JSON, NO technical tags, NO code. Just clean human-like speech.' 
       });
 
       await streamGroqResponse(toolMessages, true);
