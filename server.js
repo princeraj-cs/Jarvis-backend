@@ -167,15 +167,36 @@ const toolHandlers = {
 
   open_local_app: (args) => new Promise(resolve => {
     try {
-      const appMap = { 'vs code': 'code', 'chrome': 'chrome', 'notepad': 'notepad', 'calculator': 'calc', 'edge': 'msedge' };
-      const command = appMap[args.appName.toLowerCase()] || args.appName;
+      const appName = args.appName.toLowerCase().trim();
+      const appMap = { 
+        'vs code': 'code', 
+        'vscode': 'code',
+        'visual studio code': 'code',
+        'chrome': 'chrome', 
+        'browser': 'chrome',
+        'google chrome': 'chrome',
+        'notepad': 'notepad', 
+        'calculator': 'calc', 
+        'calc': 'calc',
+        'edge': 'msedge',
+        'microsoft edge': 'msedge',
+        'terminal': 'wt',
+        'cmd': 'cmd',
+        'powershell': 'powershell'
+      };
+      const command = appMap[appName] || appName;
+      console.log(`[SYSTEM] Launching: ${command} (Original: ${args.appName})`);
+      
       exec(`start "" ${command}`, (err) => {
         if (!err) return resolve({ status: 'success', app: args.appName });
         // Fallback: search system path or common locations
         exec(`where ${command}`, (wErr, stdout) => {
           const path = !wErr && stdout ? stdout.split('\r\n')[0].trim() : null;
-          if (path) exec(`start "" "${path}"`, (sErr) => resolve(sErr ? { error: `Failed to launch ${args.appName}` } : { status: 'success' }));
-          else resolve({ error: `App ${args.appName} not found` });
+          if (path) {
+            exec(`start "" "${path}"`, (sErr) => resolve(sErr ? { error: `Failed to launch ${args.appName}` } : { status: 'success' }));
+          } else {
+            resolve({ error: `App ${args.appName} not found` });
+          }
         });
       });
     } catch (e) {
@@ -265,9 +286,12 @@ function correctPhonetics(text) {
     'play star boy': 'play starboy',
     'open vs': 'open vscode',
     'vs code': 'vscode',
+    'visual studio code': 'vscode',
     'open chrome': 'open chrome',
     'search on google': 'search google',
-    'tell me the weather': 'get weather'
+    'tell me the weather': 'get weather',
+    'launch': 'open',
+    'start': 'open'
   };
 
   for (const [wrong, right] of Object.entries(MAP)) {
@@ -329,6 +353,7 @@ app.post('/api/chat', async (req, res) => {
             if (toolCalls.length > 0) return { toolCalls };
             res.write('data: [DONE]\n\n');
             saveMessage('assistant', fullText);
+            res.end(); // Ensure connection is closed
             return { fullText };
           }
 
@@ -354,6 +379,7 @@ app.post('/api/chat', async (req, res) => {
           }
         }
       }
+      res.end(); // Always end the response
       return { fullText, toolCalls };
     }
 
