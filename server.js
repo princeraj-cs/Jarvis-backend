@@ -407,15 +407,26 @@ app.post('/api/chat', async (req, res) => {
     let message = data.choices?.[0]?.message;
 
     // Hallucination Fallback (Non-streaming for tool detection is safer)
-    if (!message || data.error) {
-      const content = data.choices?.[0]?.message?.content || '';
-      const errorFg = data.error?.failed_generation || '';
-      if (content.includes('<function') || errorFg.includes('<function') || data.error?.code === 'tool_use_failed') {
-        const fg = errorFg || content;
-        const match = fg.match(/<function=([\w_]+)[^>]*>({[\s\S]*?})(?:<\/function>|<function>|\/function|)?/i) || 
-                      fg.match(/([\w_]+)\(({[\s\S]*?})\)/); 
+    if (!message || (message.content && message.content.includes('function='))) {
+      const content = message?.content || (data.error?.failed_generation || '');
+      if (content.includes('function=') || content.includes('<function')) {
+        // Match <function=name>{json} OR (function=name>key=value OR name({json})
+        const match = content.match(/<function=([\w_]+)[^>]*>({[\s\S]*?})/i) || 
+                      content.match(/\(function=([\w_]+)>([\s\S]*?)(?:\)|$)/i) ||
+                      content.match(/([\w_]+)\(({[\s\S]*?})\)/); 
+
         if (match) {
-          message = { role: 'assistant', tool_calls: [{ id: `m_${Date.now()}`, function: { name: match[1], arguments: match[2] } }] };
+          let args = match[2].trim();
+          // If args look like key=value, convert to JSON
+          if (!args.startsWith('{') && args.includes('=')) {
+            const obj = {};
+            args.split(',').forEach(pair => {
+              const [k, v] = pair.split('=');
+              if (k && v) obj[k.trim()] = v.trim();
+            });
+            args = JSON.stringify(obj);
+          }
+          message = { role: 'assistant', tool_calls: [{ id: `m_${Date.now()}`, function: { name: match[1], arguments: args } }] };
         }
       }
     }
@@ -444,6 +455,8 @@ app.post('/api/chat', async (req, res) => {
       finalContent = finalContent
         .replace(/<function.*?>.*?<\/function>/gi, '')
         .replace(/<tool_call.*?>.*?<\/tool_call>/gi, '')
+        .replace(/\(function=.*?>.*?(?:\)|$)/gi, '') // Strip (function=get_news>topic=world)
+        .replace(/\[function=.*?\]/gi, '') // Strip [function=...]
         .trim();
 
       res.setHeader('Content-Type', 'text/event-stream');
